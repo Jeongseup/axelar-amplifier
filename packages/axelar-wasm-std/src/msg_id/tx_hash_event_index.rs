@@ -1,5 +1,6 @@
 use core::fmt;
-use std::{fmt::Display, str::FromStr};
+use std::fmt::Display;
+use std::str::FromStr;
 
 use cosmwasm_std::HexBinary;
 use error_stack::{Report, ResultExt};
@@ -7,7 +8,8 @@ use lazy_static::lazy_static;
 use regex::Regex;
 
 use super::Error;
-use crate::{hash::Hash, nonempty};
+use crate::hash::Hash;
+use crate::nonempty;
 
 pub struct HexTxHashAndEventIndex {
     pub tx_hash: Hash,
@@ -70,6 +72,15 @@ impl Display for HexTxHashAndEventIndex {
             HexBinary::from(self.tx_hash).to_hex(),
             self.event_index
         )
+    }
+}
+
+impl From<HexTxHashAndEventIndex> for nonempty::String {
+    fn from(msg_id: HexTxHashAndEventIndex) -> Self {
+        msg_id
+            .to_string()
+            .try_into()
+            .expect("failed to convert msg id to non-empty string")
     }
 }
 

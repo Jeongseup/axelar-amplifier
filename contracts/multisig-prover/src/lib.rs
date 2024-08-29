@@ -1,15 +1,13 @@
 pub mod contract;
-pub mod encoding;
+mod encoding;
 pub mod error;
 pub mod events;
-mod execute;
-mod migrations;
 pub mod msg;
-pub mod payload;
-mod query;
-mod reply;
-pub mod state;
-pub mod types;
+mod payload;
+mod state;
+
+pub use encoding::Encoder;
+pub use payload::Payload;
 
 #[cfg(test)]
 mod test;

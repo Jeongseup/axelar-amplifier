@@ -1,15 +1,17 @@
+use std::collections::HashMap;
+
 use axelar_wasm_std::{nonempty, Threshold};
 use cosmwasm_schema::{cw_serde, QueryResponses};
-use cosmwasm_std::{Uint128, Uint64};
+use cosmwasm_std::{Addr, Uint128, Uint64};
+use msgs_derive::EnsurePermissions;
 use router_api::ChainName;
 
-use crate::state::PoolId;
+use crate::state::{Epoch, PoolId};
 
 #[cw_serde]
 pub struct InstantiateMsg {
     pub governance_address: String,
     pub rewards_denom: String,
-    pub params: Params,
 }
 
 #[cw_serde]
@@ -29,8 +31,10 @@ pub struct Params {
 }
 
 #[cw_serde]
+#[derive(EnsurePermissions)]
 pub enum ExecuteMsg {
     /// Log a specific verifier as participating in a specific event. Verifier weights are ignored
+    /// This call will error if the pool does not yet exist.
     ///
     /// TODO: For batched voting, treating the entire batch as a single event can be problematic.
     /// A verifier may vote correctly for 9 out of 10 messages in a batch, but the verifier's participation
@@ -38,6 +42,7 @@ pub enum ExecuteMsg {
     /// verifier could choose to record the participation, but then the missed message is not recorded in any way.
     /// A possible solution to this is to add a weight to each event, where the voting verifier specifies the number
     /// of messages in a batch as well as the number of messages a particular verifier actually participated in.
+    #[permission(Any)]
     RecordParticipation {
         chain_name: ChainName,
         event_id: nonempty::String,
@@ -45,18 +50,28 @@ pub enum ExecuteMsg {
     },
 
     /// Distribute rewards up to epoch T - 2 (i.e. if we are currently in epoch 10, distribute all undistributed rewards for epochs 0-8) and send the required number of tokens to each verifier
+    /// This call will error if the pool does not yet exist.
+    #[permission(Any)]
     DistributeRewards {
         pool_id: PoolId,
         /// Maximum number of historical epochs for which to distribute rewards, starting with the oldest. If not specified, distribute rewards for 10 epochs.
         epoch_count: Option<u64>,
     },
 
-    /// Start a new reward pool for the given contract if none exists. Otherwise, add tokens to an existing reward pool.
+    /// Add tokens to an existing rewards pool.
     /// Any attached funds with a denom matching the rewards denom are added to the pool.
+    /// This call will error if the pool does not yet exist.
+    #[permission(Any)]
     AddRewards { pool_id: PoolId },
 
-    /// Overwrites the currently stored params. Callable only by governance.
-    UpdateParams { params: Params },
+    /// Overwrites the currently stored params for the specified pool. Callable only by governance.
+    /// This call will error if the pool does not yet exist.
+    #[permission(Governance)]
+    UpdatePoolParams { params: Params, pool_id: PoolId },
+
+    /// Creates a rewards pool with the specified pool ID and parameters. Callable only by governance.
+    #[permission(Governance)]
+    CreatePool { params: Params, pool_id: PoolId },
 }
 
 #[cw_serde]
@@ -65,6 +80,13 @@ pub enum QueryMsg {
     /// Gets the rewards pool details for the given `pool_id``
     #[returns(RewardsPool)]
     RewardsPool { pool_id: PoolId },
+
+    /// Gets verifier participation info for a given epoch (or the current epoch if unspecified) and pool. If no participation was recorded, returns None
+    #[returns(Option<Participation>)]
+    VerifierParticipation {
+        pool_id: PoolId,
+        epoch_num: Option<u64>,
+    },
 }
 
 #[cw_serde]
@@ -74,4 +96,13 @@ pub struct RewardsPool {
     pub rewards_per_epoch: Uint128,
     pub current_epoch_num: Uint64,
     pub last_distribution_epoch: Option<Uint64>,
+}
+
+#[cw_serde]
+pub struct Participation {
+    pub event_count: u64,
+    pub participation: HashMap<Addr, u64>, // maps a verifier address to participation count
+    pub rewards_by_verifier: HashMap<Addr, Uint128>, // maps a verifier address to amount of rewards
+    pub epoch: Epoch,
+    pub params: Params,
 }

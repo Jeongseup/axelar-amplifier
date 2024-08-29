@@ -1,13 +1,13 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::broadcaster;
 use crate::commands::ServiceRegistryConfig;
-use crate::handlers::{self, config::deserialize_handler_configs};
+use crate::handlers::config::deserialize_handler_configs;
+use crate::handlers::{self};
 use crate::tofnd::Config as TofndConfig;
 use crate::url::Url;
+use crate::{broadcaster, event_processor};
 
 #[derive(Deserialize, Serialize, Debug, PartialEq)]
 #[serde(default)]
@@ -15,9 +15,7 @@ pub struct Config {
     pub health_check_bind_addr: SocketAddrV4,
     pub tm_jsonrpc: Url,
     pub tm_grpc: Url,
-    pub event_buffer_cap: usize,
-    #[serde(with = "humantime_serde")]
-    pub event_stream_timeout: Duration,
+    pub event_processor: event_processor::Config,
     pub broadcast: broadcaster::Config,
     #[serde(deserialize_with = "deserialize_handler_configs")]
     pub handlers: Vec<handlers::config::Config>,
@@ -33,8 +31,7 @@ impl Default for Config {
             broadcast: broadcaster::Config::default(),
             handlers: vec![],
             tofnd_config: TofndConfig::default(),
-            event_buffer_cap: 100000,
-            event_stream_timeout: Duration::from_secs(15),
+            event_processor: event_processor::Config::default(),
             service_registry: ServiceRegistryConfig::default(),
             health_check_bind_addr: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 3000),
         }
@@ -51,16 +48,13 @@ mod tests {
     use std::time::Duration;
 
     use cosmrs::AccountId;
-
     use router_api::ChainName;
 
+    use super::Config;
     use crate::evm::finalizer::Finalization;
-    use crate::handlers::config::Chain;
-    use crate::handlers::config::Config as HandlerConfig;
+    use crate::handlers::config::{Chain, Config as HandlerConfig};
     use crate::types::TMAddress;
     use crate::url::Url;
-
-    use super::Config;
 
     const PREFIX: &str = "axelar";
 
@@ -116,7 +110,19 @@ mod tests {
             [handlers.rpc_timeout]
             secs = 3
             nanos = 0
+
+            [[handlers]]
+            type = 'MvxMsgVerifier'
+            cosmwasm_contract = '{}'
+            proxy_url = 'http://localhost:7545'
+
+            [[handlers]]
+            type = 'MvxVerifierSetVerifier'
+            cosmwasm_contract = '{}'
+            proxy_url = 'http://localhost:7545'
             ",
+            TMAddress::random(PREFIX),
+            TMAddress::random(PREFIX),
             TMAddress::random(PREFIX),
             TMAddress::random(PREFIX),
             TMAddress::random(PREFIX),
@@ -126,7 +132,7 @@ mod tests {
         );
 
         let cfg: Config = toml::from_str(config_str.as_str()).unwrap();
-        assert_eq!(cfg.handlers.len(), 6);
+        assert_eq!(cfg.handlers.len(), 8);
     }
 
     #[test]
@@ -305,6 +311,18 @@ mod tests {
                     ),
                     rpc_url: Url::from_str("http://127.0.0.1").unwrap(),
                     rpc_timeout: Some(Duration::from_secs(3)),
+                },
+                HandlerConfig::MvxMsgVerifier {
+                    cosmwasm_contract: TMAddress::from(
+                        AccountId::new("axelar", &[0u8; 32]).unwrap(),
+                    ),
+                    proxy_url: Url::from_str("http://127.0.0.1").unwrap(),
+                },
+                HandlerConfig::MvxVerifierSetVerifier {
+                    cosmwasm_contract: TMAddress::from(
+                        AccountId::new("axelar", &[0u8; 32]).unwrap(),
+                    ),
+                    proxy_url: Url::from_str("http://127.0.0.1").unwrap(),
                 },
             ],
             ..Config::default()

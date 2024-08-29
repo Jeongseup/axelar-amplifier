@@ -1,6 +1,7 @@
-use crate::contract::Contract;
-use cosmwasm_std::{Addr, Binary, Deps, Env, StdResult};
+use cosmwasm_std::Addr;
 use cw_multi_test::{App, ContractWrapper, Executor};
+
+use crate::contract::Contract;
 
 #[derive(Clone)]
 pub struct RewardsContract {
@@ -8,16 +9,11 @@ pub struct RewardsContract {
 }
 
 impl RewardsContract {
-    pub fn instantiate_contract(
-        app: &mut App,
-        governance: Addr,
-        rewards_denom: String,
-        params: rewards::msg::Params,
-    ) -> Self {
+    pub fn instantiate_contract(app: &mut App, governance: Addr, rewards_denom: String) -> Self {
         let code = ContractWrapper::new(
             rewards::contract::execute,
             rewards::contract::instantiate,
-            |_: Deps, _: Env, _: rewards::msg::QueryMsg| -> StdResult<Binary> { todo!() },
+            rewards::contract::query,
         );
         let code_id = app.store_code(Box::new(code));
 
@@ -28,7 +24,6 @@ impl RewardsContract {
                 &rewards::msg::InstantiateMsg {
                     governance_address: governance.to_string(),
                     rewards_denom,
-                    params,
                 },
                 &[],
                 "rewards",

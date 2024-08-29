@@ -2,11 +2,10 @@ pub mod contract;
 pub mod error;
 pub mod events;
 pub mod key;
-mod migrations;
 pub mod msg;
 pub mod multisig;
-pub mod signing;
-pub mod state;
+mod signing;
+mod state;
 pub mod types;
 pub mod verifier_set;
 
@@ -16,7 +15,7 @@ mod secp256k1;
 #[cfg(feature = "ed25519")]
 mod ed25519;
 
-#[cfg(feature = "test")]
+#[cfg(any(test, feature = "test"))]
 pub mod test;
 
 pub use crate::error::ContractError;

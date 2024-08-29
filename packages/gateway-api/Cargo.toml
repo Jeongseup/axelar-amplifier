@@ -1,12 +1,16 @@
 [package]
 name = "gateway-api"
-version = "0.1.0"
+version = "1.0.0"
 rust-version = { workspace = true }
-edition = "2021"
+edition = { workspace = true }
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+axelar-wasm-std = { workspace = true }
 cosmwasm-schema = { workspace = true }
+cosmwasm-std = { workspace = true }
+error-stack = { workspace = true }
+msgs-derive = { workspace = true }
 router-api = { workspace = true }
 
 [lints]

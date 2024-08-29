@@ -1,8 +1,8 @@
 [package]
 name = "multisig"
-version = "0.3.0"
+version = "1.0.0"
 rust-version = { workspace = true }
-edition = "2021"
+edition = { workspace = true }
 description = "Multisig contract"
 
 exclude = [
@@ -36,24 +36,24 @@ test = []
 optimize = """docker run --rm -v "$(pwd)":/code \
   --mount type=volume,source="$(basename "$(pwd)")_cache",target=/code/target \
   --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
-  cosmwasm/rust-optimizer:0.12.6
+  cosmwasm/optimizer:0.16.0
 """
 
 [dependencies]
-axelar-wasm-std = { workspace = true }
-axelar-wasm-std-derive = { workspace = true }
+axelar-wasm-std = { workspace = true, features = ["derive"] }
 cosmwasm-crypto = "1.2.7"
 cosmwasm-schema = { workspace = true }
 cosmwasm-std = { workspace = true }
 cw-storage-plus = { workspace = true }
 cw-utils = "1.0.1"
 cw2 = { workspace = true }
-ed25519-dalek = { version = "2.1.1", default-features = false }
+ed25519-dalek = { workspace = true }
 enum-display-derive = "0.1.1"
 error-stack = { workspace = true }
 getrandom = { version = "0.2", default-features = false, features = ["custom"] }
 itertools = "0.11.0"
-k256 = { version = "0.13.1", features = ["ecdsa"] }
+k256 = { workspace = true }
+msgs-derive = { workspace = true }
 report = { workspace = true }
 rewards = { workspace = true, features = ["library"] }
 router-api = { workspace = true }
@@ -66,6 +66,8 @@ thiserror = { workspace = true }
 [dev-dependencies]
 curve25519-dalek = "4.1.1"
 cw-multi-test = "0.15.1"
+goldie = { workspace = true }
+hex = "0.4"
 
 [lints]
 workspace = true

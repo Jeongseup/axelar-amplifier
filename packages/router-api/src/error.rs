@@ -1,4 +1,4 @@
-use axelar_wasm_std_derive::IntoContractError;
+use axelar_wasm_std::IntoContractError;
 use cosmwasm_std::StdError;
 use thiserror::Error;
 
@@ -14,8 +14,8 @@ pub enum Error {
     #[error(transparent)]
     Std(#[from] StdError),
 
-    #[error("caller is not authorized")]
-    Unauthorized,
+    #[error("amplifier routing is disabled")]
+    RoutingDisabled,
 
     #[error("chain already exists")]
     ChainAlreadyExists,

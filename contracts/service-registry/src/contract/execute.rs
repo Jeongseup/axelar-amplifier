@@ -1,25 +1,17 @@
-use crate::state::{self, Verifier};
-use crate::state::{AuthorizationState, VERIFIERS};
+use axelar_wasm_std::nonempty;
 use router_api::ChainName;
 
 use super::*;
-
-pub fn require_governance(deps: &DepsMut, info: MessageInfo) -> Result<(), ContractError> {
-    let config = CONFIG.load(deps.storage)?;
-    if config.governance != info.sender {
-        return Err(ContractError::Unauthorized);
-    }
-    Ok(())
-}
+use crate::state::{self, AuthorizationState, Verifier, VERIFIERS};
 
 #[allow(clippy::too_many_arguments)]
 pub fn register_service(
     deps: DepsMut,
     service_name: String,
-    service_contract: Addr,
+    coordinator_contract: Addr,
     min_num_verifiers: u16,
     max_num_verifiers: Option<u16>,
-    min_verifier_bond: Uint128,
+    min_verifier_bond: nonempty::Uint128,
     bond_denom: String,
     unbonding_period_days: u16,
     description: String,
@@ -33,7 +25,7 @@ pub fn register_service(
             match service {
                 None => Ok(Service {
                     name: service_name,
-                    service_contract,
+                    coordinator_contract,
                     min_num_verifiers,
                     max_num_verifiers,
                     min_verifier_bond,
@@ -93,14 +85,17 @@ pub fn bond_verifier(
         .may_load(deps.storage, &service_name)?
         .ok_or(ContractError::ServiceNotFound)?;
 
-    let bond = if !info.funds.is_empty() {
-        info.funds
-            .iter()
-            .find(|coin| coin.denom == service.bond_denom)
-            .ok_or(ContractError::WrongDenom)?
-            .amount
+    let bond: Option<nonempty::Uint128> = if !info.funds.is_empty() {
+        Some(
+            info.funds
+                .iter()
+                .find(|coin| coin.denom == service.bond_denom)
+                .ok_or(ContractError::WrongDenom)?
+                .amount
+                .try_into()?,
+        )
     } else {
-        Uint128::zero() // sender can rebond currently unbonding funds by just sending no new funds
+        None // sender can rebond currently unbonding funds by just sending no new funds
     };
 
     VERIFIERS.update(
@@ -108,10 +103,12 @@ pub fn bond_verifier(
         (&service_name.clone(), &info.sender.clone()),
         |sw| -> Result<Verifier, ContractError> {
             match sw {
-                Some(verifier) => Ok(verifier.add_bond(bond)?),
+                Some(verifier) => Ok(verifier.bond(bond)?),
                 None => Ok(Verifier {
                     address: info.sender,
-                    bonding_state: BondingState::Bonded { amount: bond },
+                    bonding_state: BondingState::Bonded {
+                        amount: bond.ok_or(ContractError::NoFundsToBond)?,
+                    },
                     authorization_state: AuthorizationState::NotAuthorized,
                     service_name,
                 }),
@@ -132,11 +129,12 @@ pub fn register_chains_support(
         .may_load(deps.storage, &service_name)?
         .ok_or(ContractError::ServiceNotFound)?;
 
-    VERIFIERS
-        .may_load(deps.storage, (&service_name, &info.sender))?
-        .ok_or(ContractError::VerifierNotFound)?;
-
-    state::register_chains_support(deps.storage, service_name.clone(), chains, info.sender)?;
+    state::register_chains_support(
+        deps.storage,
+        service_name.clone(),
+        chains.clone(),
+        info.sender.clone(),
+    )?;
 
     Ok(Response::new())
 }
@@ -151,10 +149,6 @@ pub fn deregister_chains_support(
         .may_load(deps.storage, &service_name)?
         .ok_or(ContractError::ServiceNotFound)?;
 
-    VERIFIERS
-        .may_load(deps.storage, (&service_name, &info.sender))?
-        .ok_or(ContractError::VerifierNotFound)?;
-
     state::deregister_chains_support(deps.storage, service_name.clone(), chains, info.sender)?;
 
     Ok(Response::new())
@@ -166,7 +160,7 @@ pub fn unbond_verifier(
     info: MessageInfo,
     service_name: String,
 ) -> Result<Response, ContractError> {
-    SERVICES
+    let service = SERVICES
         .may_load(deps.storage, &service_name)?
         .ok_or(ContractError::ServiceNotFound)?;
 
@@ -174,9 +168,15 @@ pub fn unbond_verifier(
         .may_load(deps.storage, (&service_name, &info.sender))?
         .ok_or(ContractError::VerifierNotFound)?;
 
-    let can_unbond = true; // TODO: actually query the service to determine this value
+    let query = coordinator::msg::QueryMsg::ReadyToUnbond {
+        worker_address: verifier.address.clone(),
+    };
+    let ready_to_unbond = deps.querier.query(&QueryRequest::Wasm(WasmQuery::Smart {
+        contract_addr: service.coordinator_contract.into(),
+        msg: to_json_binary(&query)?,
+    }))?;
 
-    let verifier = verifier.unbond(can_unbond, env.block.time)?;
+    let verifier = verifier.unbond(ready_to_unbond, env.block.time)?;
 
     VERIFIERS.save(deps.storage, (&service_name, &info.sender), &verifier)?;
 
@@ -206,8 +206,8 @@ pub fn claim_stake(
         to_address: info.sender.into(),
         amount: [Coin {
             denom: service.bond_denom,
-            amount: released_bond,
+            amount: released_bond.into(),
         }]
-        .to_vec(), // TODO: isolate coins
+        .to_vec(),
     }))
 }

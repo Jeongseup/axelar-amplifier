@@ -1,29 +1,21 @@
+use axelar_wasm_std::nonempty;
+use axelar_wasm_std::snapshot::Participant;
 use cosmwasm_schema::cw_serde;
+use cosmwasm_std::{Addr, Storage, Timestamp, Uint128};
+use cw_storage_plus::Map;
 use router_api::ChainName;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-use cosmwasm_std::{Addr, Storage, Timestamp, Uint128};
-use cw_storage_plus::{Item, Map};
-
-#[cw_serde]
-pub struct Config {
-    pub governance: Addr,
-}
-
-pub const CONFIG: Item<Config> = Item::new("config");
-
-use axelar_wasm_std::{nonempty, snapshot::Participant};
 
 use crate::ContractError;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct Service {
     pub name: String,
-    pub service_contract: Addr,
+    pub coordinator_contract: Addr,
     pub min_num_verifiers: u16,
     pub max_num_verifiers: Option<u16>,
-    pub min_verifier_bond: Uint128,
+    pub min_verifier_bond: nonempty::Uint128,
     pub bond_denom: String,
     // should be set to a duration longer than the voting period for governance proposals,
     // otherwise a verifier could bail before they get penalized
@@ -40,27 +32,25 @@ pub struct Verifier {
 }
 
 impl Verifier {
-    pub fn add_bond(self, to_add: Uint128) -> Result<Self, ContractError> {
-        let amount = match self.bonding_state {
+    pub fn bond(self, to_add: Option<nonempty::Uint128>) -> Result<Self, ContractError> {
+        let amount: nonempty::Uint128 = match self.bonding_state {
             BondingState::Bonded { amount }
             | BondingState::RequestedUnbonding { amount }
             | BondingState::Unbonding {
                 amount,
                 unbonded_at: _,
             } => amount
-                .checked_add(to_add)
-                .map_err(ContractError::Overflow)?,
-            BondingState::Unbonded => to_add,
+                .into_inner()
+                .checked_add(to_add.map(Uint128::from).unwrap_or(Uint128::zero()))
+                .map_err(ContractError::Overflow)?
+                .try_into()?,
+            BondingState::Unbonded => to_add.ok_or(ContractError::NoFundsToBond)?,
         };
 
-        if amount.is_zero() {
-            Err(ContractError::InvalidBondingState(self.bonding_state))
-        } else {
-            Ok(Self {
-                bonding_state: BondingState::Bonded { amount },
-                ..self
-            })
-        }
+        Ok(Self {
+            bonding_state: BondingState::Bonded { amount },
+            ..self
+        })
     }
 
     pub fn unbond(self, can_unbond: bool, time: Timestamp) -> Result<Self, ContractError> {
@@ -92,7 +82,7 @@ impl Verifier {
         self,
         time: Timestamp,
         unbonding_period_days: u64,
-    ) -> Result<(Self, Uint128), ContractError> {
+    ) -> Result<(Self, nonempty::Uint128), ContractError> {
         if self.authorization_state == AuthorizationState::Jailed {
             return Err(ContractError::VerifierJailed);
         }
@@ -134,13 +124,13 @@ impl From<WeightedVerifier> for Participant {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub enum BondingState {
     Bonded {
-        amount: Uint128,
+        amount: nonempty::Uint128,
     },
     RequestedUnbonding {
-        amount: Uint128,
+        amount: nonempty::Uint128,
     },
     Unbonding {
-        amount: Uint128,
+        amount: nonempty::Uint128,
         unbonded_at: Timestamp,
     },
     Unbonded,
@@ -189,9 +179,12 @@ pub fn deregister_chains_support(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::str::FromStr;
+    use std::vec;
+
     use cosmwasm_std::testing::mock_dependencies;
-    use std::{str::FromStr, vec};
+
+    use super::*;
 
     #[test]
     fn register_single_verifier_chain_single_call_success() {
@@ -327,18 +320,18 @@ mod tests {
         let verifier = Verifier {
             address: Addr::unchecked("verifier"),
             bonding_state: BondingState::Bonded {
-                amount: Uint128::from(100u32),
+                amount: Uint128::from(100u32).try_into().unwrap(),
             },
             authorization_state: AuthorizationState::Authorized,
             service_name: "validators".to_string(),
         };
 
-        let res = verifier.add_bond(Uint128::from(200u32));
+        let res = verifier.bond(Some(Uint128::from(200u32).try_into().unwrap()));
         assert!(res.is_ok());
         assert_eq!(
             res.unwrap().bonding_state,
             BondingState::Bonded {
-                amount: Uint128::from(300u32)
+                amount: Uint128::from(300u32).try_into().unwrap()
             }
         );
     }
@@ -348,18 +341,18 @@ mod tests {
         let verifier = Verifier {
             address: Addr::unchecked("verifier"),
             bonding_state: BondingState::RequestedUnbonding {
-                amount: Uint128::from(100u32),
+                amount: Uint128::from(100u32).try_into().unwrap(),
             },
             authorization_state: AuthorizationState::Authorized,
             service_name: "validators".to_string(),
         };
 
-        let res = verifier.add_bond(Uint128::from(200u32));
+        let res = verifier.bond(Some(Uint128::from(200u32).try_into().unwrap()));
         assert!(res.is_ok());
         assert_eq!(
             res.unwrap().bonding_state,
             BondingState::Bonded {
-                amount: Uint128::from(300u32)
+                amount: Uint128::from(300u32).try_into().unwrap()
             }
         );
     }
@@ -369,19 +362,19 @@ mod tests {
         let verifier = Verifier {
             address: Addr::unchecked("verifier"),
             bonding_state: BondingState::Unbonding {
-                amount: Uint128::from(100u32),
+                amount: Uint128::from(100u32).try_into().unwrap(),
                 unbonded_at: Timestamp::from_nanos(0),
             },
             authorization_state: AuthorizationState::Authorized,
             service_name: "validators".to_string(),
         };
 
-        let res = verifier.add_bond(Uint128::from(200u32));
+        let res = verifier.bond(Some(Uint128::from(200u32).try_into().unwrap()));
         assert!(res.is_ok());
         assert_eq!(
             res.unwrap().bonding_state,
             BondingState::Bonded {
-                amount: Uint128::from(300u32)
+                amount: Uint128::from(300u32).try_into().unwrap()
             }
         );
     }
@@ -395,12 +388,12 @@ mod tests {
             service_name: "validators".to_string(),
         };
 
-        let res = verifier.add_bond(Uint128::from(200u32));
+        let res = verifier.bond(Some(Uint128::from(200u32).try_into().unwrap()));
         assert!(res.is_ok());
         assert_eq!(
             res.unwrap().bonding_state,
             BondingState::Bonded {
-                amount: Uint128::from(200u32)
+                amount: Uint128::from(200u32).try_into().unwrap()
             }
         );
     }
@@ -416,12 +409,28 @@ mod tests {
             service_name: "validators".to_string(),
         };
 
-        let res = verifier.add_bond(Uint128::from(0u32));
+        let res = verifier.bond(None);
         assert!(res.is_err());
-        assert_eq!(
-            res.unwrap_err(),
-            ContractError::InvalidBondingState(bonding_state)
-        );
+        assert_eq!(res.unwrap_err(), ContractError::NoFundsToBond);
+    }
+    #[test]
+    fn test_zero_bond_rebond() {
+        let amount = nonempty::Uint128::try_from(100u128).unwrap();
+        let bonding_state = BondingState::Unbonding {
+            amount,
+            unbonded_at: Timestamp::from_nanos(0),
+        };
+
+        let verifier = Verifier {
+            address: Addr::unchecked("verifier"),
+            bonding_state: bonding_state.clone(),
+            authorization_state: AuthorizationState::Authorized,
+            service_name: "validators".to_string(),
+        };
+
+        let res = verifier.bond(None);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap().bonding_state, BondingState::Bonded { amount });
     }
 
     #[test]
@@ -429,7 +438,7 @@ mod tests {
         let verifier = Verifier {
             address: Addr::unchecked("verifier"),
             bonding_state: BondingState::Bonded {
-                amount: Uint128::from(100u32),
+                amount: Uint128::from(100u32).try_into().unwrap(),
             },
             authorization_state: AuthorizationState::Authorized,
             service_name: "validators".to_string(),
@@ -441,7 +450,7 @@ mod tests {
         assert_eq!(
             res.unwrap().bonding_state,
             BondingState::Unbonding {
-                amount: Uint128::from(100u32),
+                amount: Uint128::from(100u32).try_into().unwrap(),
                 unbonded_at
             }
         );
@@ -452,7 +461,7 @@ mod tests {
         let verifier = Verifier {
             address: Addr::unchecked("verifier"),
             bonding_state: BondingState::Bonded {
-                amount: Uint128::from(100u32),
+                amount: Uint128::from(100u32).try_into().unwrap(),
             },
             authorization_state: AuthorizationState::Authorized,
             service_name: "validators".to_string(),
@@ -464,7 +473,7 @@ mod tests {
         assert_eq!(
             res.unwrap().bonding_state,
             BondingState::RequestedUnbonding {
-                amount: Uint128::from(100u32)
+                amount: Uint128::from(100u32).try_into().unwrap()
             }
         );
     }
@@ -474,7 +483,7 @@ mod tests {
         let verifier = Verifier {
             address: Addr::unchecked("verifier"),
             bonding_state: BondingState::RequestedUnbonding {
-                amount: Uint128::from(100u32),
+                amount: Uint128::from(100u32).try_into().unwrap(),
             },
             authorization_state: AuthorizationState::Authorized,
             service_name: "validators".to_string(),
@@ -486,7 +495,7 @@ mod tests {
         assert_eq!(
             res.unwrap().bonding_state,
             BondingState::Unbonding {
-                amount: Uint128::from(100u32),
+                amount: Uint128::from(100u32).try_into().unwrap(),
                 unbonded_at
             }
         );
@@ -497,7 +506,7 @@ mod tests {
         let verifier = Verifier {
             address: Addr::unchecked("verifier"),
             bonding_state: BondingState::RequestedUnbonding {
-                amount: Uint128::from(100u32),
+                amount: Uint128::from(100u32).try_into().unwrap(),
             },
             authorization_state: AuthorizationState::Authorized,
             service_name: "validators".to_string(),
@@ -509,7 +518,7 @@ mod tests {
         assert_eq!(
             res.unwrap().bonding_state,
             BondingState::RequestedUnbonding {
-                amount: Uint128::from(100u32)
+                amount: Uint128::from(100u32).try_into().unwrap(),
             }
         );
     }
@@ -517,7 +526,7 @@ mod tests {
     #[test]
     fn test_unbonding_unbond() {
         let bonding_state = BondingState::Unbonding {
-            amount: Uint128::from(100u32),
+            amount: Uint128::from(100u32).try_into().unwrap(),
             unbonded_at: Timestamp::from_nanos(0),
         };
 
@@ -572,7 +581,7 @@ mod tests {
     #[test]
     fn test_bonded_claim_stake() {
         let bonding_state = BondingState::Bonded {
-            amount: Uint128::from(100u32),
+            amount: Uint128::from(100u32).try_into().unwrap(),
         };
         let verifier = Verifier {
             address: Addr::unchecked("verifier"),
@@ -599,7 +608,7 @@ mod tests {
     #[test]
     fn test_requested_unbonding_claim_stake() {
         let bonding_state = BondingState::RequestedUnbonding {
-            amount: Uint128::from(100u32),
+            amount: Uint128::from(100u32).try_into().unwrap(),
         };
         let verifier = Verifier {
             address: Addr::unchecked("verifier"),
@@ -626,7 +635,7 @@ mod tests {
     #[test]
     fn test_unbonding_claim_stake() {
         let bonding_state = BondingState::Unbonding {
-            amount: Uint128::from(100u32),
+            amount: Uint128::from(100u32).try_into().unwrap(),
             unbonded_at: Timestamp::from_nanos(0),
         };
         let verifier = Verifier {
@@ -649,7 +658,10 @@ mod tests {
         let (verifier, amount) = res.unwrap();
         assert_eq!(
             (verifier.bonding_state, amount),
-            (BondingState::Unbonded, Uint128::from(100u32))
+            (
+                BondingState::Unbonded,
+                Uint128::from(100u32).try_into().unwrap()
+            )
         );
     }
 
@@ -683,7 +695,7 @@ mod tests {
         let verifier = Verifier {
             address: Addr::unchecked("verifier"),
             bonding_state: BondingState::Bonded {
-                amount: Uint128::from(100u32),
+                amount: Uint128::from(100u32).try_into().unwrap(),
             },
             authorization_state: AuthorizationState::Jailed,
             service_name: "validators".to_string(),
@@ -699,7 +711,7 @@ mod tests {
         let verifier = Verifier {
             address: Addr::unchecked("verifier"),
             bonding_state: BondingState::Unbonding {
-                amount: Uint128::from(100u32),
+                amount: Uint128::from(100u32).try_into().unwrap(),
                 unbonded_at: Timestamp::from_nanos(0),
             },
             authorization_state: AuthorizationState::Jailed,

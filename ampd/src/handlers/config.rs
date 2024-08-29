@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use itertools::Itertools;
+use router_api::ChainName;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_with::with_prefix;
@@ -8,7 +9,6 @@ use serde_with::with_prefix;
 use crate::evm::finalizer::Finalization;
 use crate::types::TMAddress;
 use crate::url::Url;
-use router_api::ChainName;
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct Chain {
@@ -46,6 +46,14 @@ pub enum Config {
         cosmwasm_contract: TMAddress,
         rpc_url: Url,
         rpc_timeout: Option<Duration>,
+    },
+    MvxMsgVerifier {
+        cosmwasm_contract: TMAddress,
+        proxy_url: Url,
+    },
+    MvxVerifierSetVerifier {
+        cosmwasm_contract: TMAddress,
+        proxy_url: Url,
     },
 }
 
@@ -142,6 +150,38 @@ where
     }
 }
 
+fn validate_mvx_msg_verifier_config<'de, D>(configs: &[Config]) -> Result<(), D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match configs
+        .iter()
+        .filter(|config| matches!(config, Config::MvxMsgVerifier { .. }))
+        .count()
+    {
+        count if count > 1 => Err(de::Error::custom(
+            "only one Mvx msg verifier config is allowed",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn validate_mvx_worker_set_verifier_config<'de, D>(configs: &[Config]) -> Result<(), D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match configs
+        .iter()
+        .filter(|config| matches!(config, Config::MvxVerifierSetVerifier { .. }))
+        .count()
+    {
+        count if count > 1 => Err(de::Error::custom(
+            "only one Mvx worker set verifier config is allowed",
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub fn deserialize_handler_configs<'de, D>(deserializer: D) -> Result<Vec<Config>, D::Error>
 where
     D: Deserializer<'de>,
@@ -153,6 +193,8 @@ where
     validate_multisig_signer_config::<D>(&configs)?;
     validate_sui_msg_verifier_config::<D>(&configs)?;
     validate_sui_verifier_set_verifier_config::<D>(&configs)?;
+    validate_mvx_msg_verifier_config::<D>(&configs)?;
+    validate_mvx_worker_set_verifier_config::<D>(&configs)?;
 
     Ok(configs)
 }
@@ -160,7 +202,8 @@ where
 #[cfg(test)]
 mod tests {
 
-    use crate::{evm::finalizer::Finalization, handlers::config::Chain};
+    use crate::evm::finalizer::Finalization;
+    use crate::handlers::config::Chain;
 
     #[test]
     fn finalizer_should_default_to_ethereum() {

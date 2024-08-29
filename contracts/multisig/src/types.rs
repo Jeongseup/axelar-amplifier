@@ -18,6 +18,7 @@ impl AsRef<[u8]> for MsgToSign {
     }
 }
 
+#[cfg(any(test, feature = "test"))]
 impl MsgToSign {
     pub fn unchecked(hex: HexBinary) -> Self {
         Self(hex)
@@ -44,15 +45,14 @@ impl TryFrom<HexBinary> for MsgToSign {
             });
         }
 
-        Ok(MsgToSign::unchecked(other))
+        Ok(MsgToSign(other))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::test::common::ecdsa_test_data;
-
     use super::*;
+    use crate::test::common::ecdsa_test_data;
 
     #[test]
     fn test_try_from_hexbinary_to_message() {

@@ -1,30 +1,31 @@
-use std::path::Path;
-
 use clap::Subcommand;
-use cosmos_sdk_proto::cosmos::base::abci::v1beta1::TxResponse;
-use cosmos_sdk_proto::cosmos::{
-    auth::v1beta1::query_client::QueryClient, tx::v1beta1::service_client::ServiceClient,
-};
-use cosmos_sdk_proto::Any;
+use cosmrs::proto::cosmos::auth::v1beta1::query_client::QueryClient as AuthQueryClient;
+use cosmrs::proto::cosmos::bank::v1beta1::query_client::QueryClient as BankQueryClient;
+use cosmrs::proto::cosmos::base::abci::v1beta1::TxResponse;
+use cosmrs::proto::cosmos::tx::v1beta1::service_client::ServiceClient;
+use cosmrs::proto::Any;
 use cosmrs::AccountId;
-use error_stack::Result;
-use error_stack::ResultExt;
+use error_stack::{report, FutureExt, Result, ResultExt};
+use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{Receiver, Sender};
 use valuable::Valuable;
 
+use crate::asyncutil::future::RetryPolicy;
 use crate::broadcaster::Broadcaster;
-use crate::config::Config as AmpdConfig;
-use crate::state;
-use crate::tofnd::grpc::{MultisigClient, SharableEcdsaClient};
+use crate::config::{Config as AmpdConfig, Config};
+use crate::tofnd::grpc::{Multisig, MultisigClient};
 use crate::types::{PublicKey, TMAddress};
-use crate::{broadcaster, Error};
-use crate::{tofnd, PREFIX};
+use crate::{broadcaster, tofnd, Error, PREFIX};
 
 pub mod bond_verifier;
+pub mod claim_stake;
 pub mod daemon;
 pub mod deregister_chain_support;
 pub mod register_chain_support;
 pub mod register_public_key;
+pub mod send_tokens;
+pub mod unbond_verifier;
 pub mod verifier_address;
 
 #[derive(Debug, Subcommand, Valuable)]
@@ -33,14 +34,20 @@ pub enum SubCommand {
     Daemon,
     /// Bond the verifier to the service registry contract
     BondVerifier(bond_verifier::Args),
+    /// Unbond the verifier from the service registry contract
+    UnbondVerifier(unbond_verifier::Args),
+    /// Claim unbonded stake from the service registry contract
+    ClaimStake(claim_stake::Args),
     /// Register chain support to the service registry contract
     RegisterChainSupport(register_chain_support::Args),
     /// Deregister chain support to the service registry contract
     DeregisterChainSupport(deregister_chain_support::Args),
     /// Register public key to the multisig contract
-    RegisterPublicKey,
+    RegisterPublicKey(register_public_key::Args),
     /// Query the verifier address
     VerifierAddress,
+    /// Send tokens from the verifier account to a specified address
+    SendTokens(send_tokens::Args),
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -56,20 +63,14 @@ impl Default for ServiceRegistryConfig {
     }
 }
 
-async fn verifier_pub_key(state_path: &Path, config: tofnd::Config) -> Result<PublicKey, Error> {
-    let state = state::load(state_path).change_context(Error::LoadConfig)?;
-
-    match state.pub_key {
-        Some(pub_key) => Ok(pub_key),
-        None => SharableEcdsaClient::new(
-            MultisigClient::connect(config.party_uid, config.url)
-                .await
-                .change_context(Error::Connection)?,
-        )
-        .keygen(&config.key_uid)
+async fn verifier_pub_key(config: tofnd::Config) -> Result<PublicKey, Error> {
+    MultisigClient::new(config.party_uid, config.url.clone())
         .await
-        .change_context(Error::Tofnd),
-    }
+        .change_context(Error::Connection)
+        .attach_printable(config.url.clone())?
+        .keygen(&config.key_uid, tofnd::Algorithm::Ecdsa)
+        .await
+        .change_context(Error::Tofnd)
 }
 
 async fn broadcast_tx(
@@ -77,38 +78,87 @@ async fn broadcast_tx(
     tx: Any,
     pub_key: PublicKey,
 ) -> Result<TxResponse, Error> {
+    let (confirmation_sender, mut confirmation_receiver) = tokio::sync::mpsc::channel(1);
+    let (hash_to_confirm_sender, hash_to_confirm_receiver) = tokio::sync::mpsc::channel(1);
+
+    let mut broadcaster = instantiate_broadcaster(
+        config,
+        pub_key,
+        hash_to_confirm_receiver,
+        confirmation_sender,
+    )
+    .await?;
+
+    broadcaster
+        .broadcast(vec![tx])
+        .change_context(Error::Broadcaster)
+        .and_then(|response| {
+            hash_to_confirm_sender
+                .send(response.txhash)
+                .change_context(Error::Broadcaster)
+        })
+        .await?;
+
+    confirmation_receiver
+        .recv()
+        .await
+        .ok_or(report!(Error::TxConfirmation))
+        .map(|tx| tx.response)
+}
+
+async fn instantiate_broadcaster(
+    config: Config,
+    pub_key: PublicKey,
+    tx_hashes_to_confirm: Receiver<String>,
+    confirmed_txs: Sender<broadcaster::confirm_tx::TxResponse>,
+) -> Result<impl Broadcaster, Error> {
     let AmpdConfig {
         tm_grpc,
         broadcast,
         tofnd_config,
         ..
     } = config;
-
     let service_client = ServiceClient::connect(tm_grpc.to_string())
         .await
-        .change_context(Error::Connection)?;
-    let query_client = QueryClient::connect(tm_grpc.to_string())
+        .change_context(Error::Connection)
+        .attach_printable(tm_grpc.clone())?;
+    let auth_query_client = AuthQueryClient::connect(tm_grpc.to_string())
         .await
-        .change_context(Error::Connection)?;
-    let ecdsa_client = SharableEcdsaClient::new(
-        MultisigClient::connect(tofnd_config.party_uid, tofnd_config.url)
-            .await
-            .change_context(Error::Connection)?,
-    );
-    let address = pub_key
-        .account_id(PREFIX)
-        .expect("failed to convert to account identifier")
-        .into();
+        .change_context(Error::Connection)
+        .attach_printable(tm_grpc.clone())?;
+    let bank_query_client = BankQueryClient::connect(tm_grpc.to_string())
+        .await
+        .change_context(Error::Connection)
+        .attach_printable(tm_grpc)?;
+    let multisig_client = MultisigClient::new(tofnd_config.party_uid, tofnd_config.url.clone())
+        .await
+        .change_context(Error::Connection)
+        .attach_printable(tofnd_config.url)?;
 
-    broadcaster::BroadcastClient::builder()
+    broadcaster::confirm_tx::TxConfirmer::new(
+        service_client.clone(),
+        RetryPolicy::RepeatConstant {
+            sleep: broadcast.tx_fetch_interval,
+            max_attempts: broadcast.tx_fetch_max_retries.saturating_add(1).into(),
+        },
+        tx_hashes_to_confirm,
+        confirmed_txs,
+    )
+    .run()
+    .await
+    .change_context(Error::TxConfirmation)?;
+
+    let basic_broadcaster = broadcaster::UnvalidatedBasicBroadcaster::builder()
         .client(service_client)
-        .signer(ecdsa_client)
-        .query_client(query_client)
+        .signer(multisig_client)
+        .auth_query_client(auth_query_client)
+        .bank_query_client(bank_query_client)
         .pub_key((tofnd_config.key_uid, pub_key))
         .config(broadcast)
-        .address(address)
+        .address_prefix(PREFIX.to_string())
         .build()
-        .broadcast(vec![tx])
+        .validate_fee_denomination()
         .await
-        .change_context(Error::Broadcaster)
+        .change_context(Error::Broadcaster)?;
+    Ok(basic_broadcaster)
 }

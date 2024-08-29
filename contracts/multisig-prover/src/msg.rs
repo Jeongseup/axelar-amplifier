@@ -1,10 +1,13 @@
-use axelar_wasm_std::{hash::Hash, MajorityThreshold};
+use axelar_wasm_std::hash::Hash;
+use axelar_wasm_std::MajorityThreshold;
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{HexBinary, Uint64};
+use msgs_derive::EnsurePermissions;
 use multisig::key::KeyType;
 use router_api::CrossChainId;
 
-use crate::{encoding::Encoder, payload::Payload};
+use crate::encoding::Encoder;
+use crate::payload::Payload;
 
 #[cw_serde]
 pub struct InstantiateMsg {
@@ -47,38 +50,48 @@ pub struct InstantiateMsg {
     /// deployed on the destination chain. The multisig contract supports multiple public keys per verifier (each a different type of key), and this
     /// parameter controls which registered public key to use for signing for each verifier registered to the destination chain.
     pub key_type: KeyType,
-    /// an opaque value created to distinguish distinct chains that the external gateway should be initialized with.
+    /// An opaque value created to distinguish distinct chains that the external gateway should be initialized with.
+    /// Value must be a String in hex format without `0x`, e.g. "598ba04d225cec385d1ce3cf3c9a076af803aa5c614bc0e0d176f04ac8d28f55".
+    #[serde(with = "axelar_wasm_std::hex")] // (de)serialization with hex module
+    #[schemars(with = "String")] // necessary attribute in conjunction with #[serde(with ...)]
     pub domain_separator: Hash,
 }
 
 #[cw_serde]
+#[derive(EnsurePermissions)]
 pub enum ExecuteMsg {
     // Start building a proof that includes specified messages
     // Queries the gateway for actual message contents
-    ConstructProof {
-        message_ids: Vec<CrossChainId>,
-    },
+    #[permission(Any)]
+    ConstructProof(Vec<CrossChainId>),
+    #[permission(Elevated)]
     UpdateVerifierSet,
+
+    #[permission(Any)]
     ConfirmVerifierSet,
     // Updates the signing threshold. The threshold currently in use does not change.
     // The verifier set must be updated and confirmed for the change to take effect.
-    // Callable only by governance.
+    #[permission(Governance)]
     UpdateSigningThreshold {
         new_signing_threshold: MajorityThreshold,
     },
-    UpdateAdmin {
-        new_admin_address: String,
-    },
+    #[permission(Governance)]
+    UpdateAdmin { new_admin_address: String },
 }
 
 #[cw_serde]
 #[derive(QueryResponses)]
 pub enum QueryMsg {
-    #[returns(GetProofResponse)]
-    GetProof { multisig_session_id: Uint64 },
+    #[returns(ProofResponse)]
+    Proof { multisig_session_id: Uint64 },
 
-    #[returns(Option<multisig::verifier_set::VerifierSet>)]
-    GetVerifierSet,
+    /// Returns a `VerifierSetResponse` with the current verifier set id and the verifier set itself.
+    #[returns(Option<VerifierSetResponse>)]
+    CurrentVerifierSet,
+
+    /// Returns a `VerifierSetResponse` with the next verifier set id and the verifier set itself.
+    #[returns(Option<VerifierSetResponse>)]
+    NextVerifierSet,
 }
 
 #[cw_serde]
@@ -88,9 +101,24 @@ pub enum ProofStatus {
 }
 
 #[cw_serde]
-pub struct GetProofResponse {
+pub struct ProofResponse {
     pub multisig_session_id: Uint64,
     pub message_ids: Vec<CrossChainId>,
     pub payload: Payload,
     pub status: ProofStatus,
+}
+
+#[cw_serde]
+pub struct VerifierSetResponse {
+    pub id: String,
+    pub verifier_set: multisig::verifier_set::VerifierSet,
+}
+
+impl From<multisig::verifier_set::VerifierSet> for VerifierSetResponse {
+    fn from(set: multisig::verifier_set::VerifierSet) -> Self {
+        VerifierSetResponse {
+            id: set.id(),
+            verifier_set: set,
+        }
+    }
 }
